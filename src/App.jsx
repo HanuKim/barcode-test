@@ -6,13 +6,27 @@ import Scanner from './screens/Scanner';
 import Result from './screens/Result';
 import SettingsScreen from './screens/Settings';
 
+// [NEW] Capacitor Speech Recognition
+import { Capacitor } from '@capacitor/core';
+import { SpeechRecognition } from '@capacitor-community/speech-recognition';
+
+const isNative = Capacitor.isNativePlatform();
+
 // ================================================================
 // 알러지 가드 - 메인 App
 // 실제 음성 입력(Web Speech API) + Capacitor 하이브리드
 // ================================================================
 
+// [LEGACY] 기존 Web Speech API — Capacitor @capacitor-community/speech-recognition 으로 대체됨
+// const SpeechRecognitionAPI = typeof window !== 'undefined'
+//   && (window.SpeechRecognition || window.webkitSpeechRecognition);
+
+// Web Speech API (웹 폴백 용 — 네이티브 STT 실패 시에도 사용)
 const SpeechRecognitionAPI = typeof window !== 'undefined'
   && (window.SpeechRecognition || window.webkitSpeechRecognition);
+
+// 네이티브 STT 플러그인 사용 가능 여부 (런타임에 UNIMPLEMENTED 시 false로 전환)
+let useNativeSTT = isNative;
 
 function App() {
   const [screen, setScreen] = useState('loading');
@@ -68,6 +82,11 @@ function App() {
 
   // ── 음성 인식 제어 ──
   const stopRecognition = useCallback(() => {
+    if (useNativeSTT) {
+      // [Capacitor] 네이티브 음성 인식 중지
+      SpeechRecognition.stop().catch(() => {});
+    }
+    // [LEGACY] Web Speech API 중지
     if (recognitionRef.current) {
       try { recognitionRef.current.abort(); } catch { /* ignore */ }
       recognitionRef.current = null;
@@ -111,7 +130,68 @@ function App() {
     }
   }, [navigateTo, prevScreen, screen, resultProduct, stopRecognition]);
 
-  const startRecognition = useCallback(() => {
+  const startRecognition = useCallback(async () => {
+    // ── 네이티브: Capacitor Speech Recognition ──
+    if (useNativeSTT) {
+      try {
+        const { available } = await SpeechRecognition.available();
+        if (!available) {
+          // 네이티브 플러그인 미지원 — 웹 폴백으로 전환
+          console.warn('Capacitor STT 미지원 — 웹 STT로 폴백');
+          useNativeSTT = false;
+          // fall through to web path below
+        } else {
+          const perms = await SpeechRecognition.checkPermissions();
+          if (perms.speechRecognition !== 'granted') {
+            await SpeechRecognition.requestPermissions();
+          }
+
+          stopTTS();
+          stopRecognition();
+          setSttListening(true);
+          setSttTranscript('');
+
+          // 부분 결과 리스너
+          await SpeechRecognition.addListener('partialResults', (data) => {
+            if (data.matches && data.matches.length > 0) {
+              setSttTranscript(data.matches[0]);
+            }
+          });
+
+          // 음성 인식 시작
+          const result = await SpeechRecognition.start({
+            language: 'ko-KR',
+            maxResults: 3,
+            partialResults: true,
+            popup: false,
+          });
+
+          setSttListening(false);
+          await SpeechRecognition.removeAllListeners();
+
+          if (result.matches && result.matches.length > 0) {
+            const finalText = result.matches[0];
+            setSttTranscript(finalText);
+            const matched = matchCommand(finalText);
+            if (matched) {
+              handleVoiceCommand(matched);
+            } else {
+              speak(`"${finalText}" — 인식할 수 없는 명령입니다. 다시 시도해주세요.`);
+            }
+          }
+          return;
+        }
+      } catch (err) {
+        // UNIMPLEMENTED 또는 기타 에러 — 웹 폴백으로 자동 전환
+        console.warn('Capacitor STT 에러 — 웹 STT로 폴백:', err);
+        useNativeSTT = false;
+        setSttListening(false);
+        // fall through to web path below
+      }
+    }
+
+    // ── 웹 폴백: Web Speech API ──
+    // [LEGACY] webkitSpeechRecognition / SpeechRecognition API
     if (!SpeechRecognitionAPI) {
       showToast('이 브라우저에서는 음성 인식이 지원되지 않습니다.');
       return;

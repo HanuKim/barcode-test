@@ -2,6 +2,16 @@
 // 알러지 가드 - 유틸리티 & Mock 데이터
 // ================================================================
 
+// [NEW] Capacitor 네이티브 플러그인
+import { Capacitor } from '@capacitor/core';
+import { Haptics, ImpactStyle, NotificationType } from '@capacitor/haptics';
+import { TextToSpeech } from '@capacitor-community/text-to-speech';
+
+const isNative = Capacitor.isNativePlatform();
+// 네이티브 플러그인 사용 가능 여부 (런타임에 UNIMPLEMENTED 시 false로 전환)
+let useNativeTTS = isNative;
+let useNativeHaptics = isNative;
+
 // [Capacitor] 실제: import { Device } from '@capacitor/device'
 // [검증] iOS/Android 모두 Capacitor Device 플러그인으로 동일 API 사용 가능
 export const Platform = {
@@ -60,21 +70,34 @@ export const MOCK_PRODUCTS = {
 };
 
 // ----------------------------------------------------------------
-// TTS (Web Speech API mock for Capacitor TTS)
+// TTS (Capacitor Text-to-Speech 네이티브 + Web Speech API 폴백)
 // ----------------------------------------------------------------
-// [Capacitor] 실제: import { TextToSpeech } from '@capacitor-community/text-to-speech'
-// [Mock] 실제 연동 시 이 블록을 Capacitor 플러그인 호출로 교체
+// [LEGACY] 기존 Web Speech API (SpeechSynthesisUtterance) 사용
+//          → Capacitor @capacitor-community/text-to-speech 로 대체됨
+//          → 웹 환경에서는 기존 Web Speech API를 폴백으로 유지
 
 let ttsQueue = [];
 let ttsActive = false;
 let lastToastTime = 0; // 토스트 스팸 방지
 
+/**
+ * TTS 텍스트 클렌징 (iOS SSML Parser Error 방지)
+ */
+function cleanTextForTTS(text) {
+  return text
+    .replace(/[&<>"']/g, '')           // XML 엔티티 브레이커 제거
+    .replace(/[()[\]{}]/g, ' ')         // 괄호를 공백으로 대체
+    .replace(/[\uE000-\uF8FF]|\uD83C[\uDC00-\uDFFF]|\uD83D[\uDC00-\uDFFF]|[\u2011-\u26FF]|\uD83E[\uDD10-\uDDFF]/g, '') // 이모지 제거
+    .replace(/\s+/g, ' ')              // 연속 공백 단일화
+    .trim();
+}
+
 export function speak(text, rate = null) {
   if (!text) return;
   const r = rate ?? parseFloat(localStorage.getItem('ttsRate') || '1.0');
 
-  if (!window.speechSynthesis) {
-    // 토스트 폴백: 3초에 1회만
+  if (!useNativeTTS && !window.speechSynthesis) {
+    // 웹 환경에서 speechSynthesis 미지원 시 토스트 폴백
     const now = Date.now();
     if (now - lastToastTime > 3000) {
       lastToastTime = now;
@@ -92,20 +115,52 @@ function processTTSQueue() {
   ttsActive = true;
   const { text, rate } = ttsQueue.shift();
 
-  // iOS SSML Parser Error 방지를 위한 텍스트 클렌징
-  // (XML 특수문자, 따옴표, 괄호 및 특수 기호/이모지 제거)
-  const cleanText = text
-    .replace(/[&<>"']/g, '') // XML 엔티티 브레이커 제거
-    .replace(/[()[\]{}]/g, ' ') // 괄호를 공백으로 대체
-    .replace(/[\uE000-\uF8FF]|\uD83C[\uDC00-\uDFFF]|\uD83D[\uDC00-\uDFFF]|[\u2011-\u26FF]|\uD83E[\uDD10-\uDDFF]/g, '') // 이모지 제거
-    .replace(/\s+/g, ' ') // 연속 공백 단일화
-    .trim();
-
+  const cleanText = cleanTextForTTS(text);
   if (!cleanText) {
     processTTSQueue();
     return;
   }
 
+  // ── 네이티브: Capacitor Text-to-Speech ──
+  if (useNativeTTS) {
+    TextToSpeech.speak({
+      text: cleanText,
+      lang: 'ko-KR',
+      rate: rate,
+      pitch: 1.0,
+      volume: 1.0,
+      // category 파라미터 제거: iOS에서 오디오 세션 문제 유발 가능
+    }).then(() => processTTSQueue())
+      .catch((err) => {
+        console.error('[TTS] 네이티브 TTS 에러:', err?.code, err?.message, err);
+        // UNIMPLEMENTED 에러 — 웹 TTS로 자동 전환
+        if (err?.code === 'UNIMPLEMENTED') {
+          console.warn('[TTS] Capacitor TTS 미지원 — 웹 TTS로 폴백');
+          useNativeTTS = false;
+          speakWithWebAPI(cleanText, rate);
+        } else {
+          const now = Date.now();
+          if (now - lastToastTime > 3000) {
+            lastToastTime = now;
+            showToastGlobal?.(cleanText);
+          }
+          processTTSQueue();
+        }
+      });
+    return;
+  }
+
+  // ── 웹 폴백: Web Speech API ──
+  speakWithWebAPI(cleanText, rate);
+}
+
+/** 웹 Speech API로 TTS 실행 (웹 및 네이티브 폴백 공용) */
+function speakWithWebAPI(cleanText, rate) {
+  if (!window.speechSynthesis) {
+    processTTSQueue();
+    return;
+  }
+  // [LEGACY] SpeechSynthesisUtterance 기반 TTS
   const utter = new SpeechSynthesisUtterance(cleanText);
   utter.lang = 'ko-KR';
   utter.rate = rate;
@@ -113,7 +168,6 @@ function processTTSQueue() {
   utter.volume = 1.0;
   utter.onend = () => processTTSQueue();
   utter.onerror = () => {
-    // TTS 에러 시 토스트 폴백 — 스팸 방지
     const now = Date.now();
     if (now - lastToastTime > 3000) {
       lastToastTime = now;
@@ -128,6 +182,10 @@ function processTTSQueue() {
 export function stopTTS() {
   ttsQueue = [];
   ttsActive = false;
+  if (useNativeTTS) {
+    TextToSpeech.stop().catch(() => {});
+  }
+  // 웹 API도 항상 정리 (네이티브에서 폴백 중일 수 있으므로)
   window.speechSynthesis?.cancel();
 }
 
@@ -136,18 +194,50 @@ let showToastGlobal = null;
 export function setToastCallback(fn) { showToastGlobal = fn; }
 
 // ----------------------------------------------------------------
-// Haptics
+// Haptics (Capacitor Haptics 네이티브 + navigator.vibrate 폴백)
 // ----------------------------------------------------------------
-// [Capacitor] 실제: import { Haptics, ImpactStyle } from '@capacitor/haptics'
-// [Mock] 실제 연동 시 이 블록을 Capacitor 플러그인 호출로 교체
+// [LEGACY] navigator.vibrate — Capacitor @capacitor/haptics 로 대체됨
+//          → 웹 환경에서는 기존 navigator.vibrate를 폴백으로 유지
+
 export function hapticImpact() {
-  // [Capacitor] 실제: await Haptics.impact({ style: ImpactStyle.Medium });
+  if (useNativeHaptics) {
+    Haptics.impact({ style: ImpactStyle.Medium })
+      .catch((err) => {
+        if (err?.code === 'UNIMPLEMENTED') { useNativeHaptics = false; }
+        try { navigator.vibrate?.(50); } catch { /* ignore */ }
+      });
+    return;
+  }
   try { navigator.vibrate?.(50); } catch { /* 미지원 시 무시 */ }
 }
 
 export function hapticWarning() {
-  // [Capacitor] 실제: await Haptics.vibrate({ duration: 500 });
+  if (useNativeHaptics) {
+    Haptics.vibrate({ duration: 500 })
+      .catch((err) => {
+        if (err?.code === 'UNIMPLEMENTED') { useNativeHaptics = false; }
+        try { navigator.vibrate?.(500); } catch { /* ignore */ }
+      });
+    return;
+  }
   try { navigator.vibrate?.(500); } catch { /* 미지원 시 무시 */ }
+}
+
+/**
+ * 바코드 인식 성공 시 전용 진동 피드백
+ * 네이티브: NotificationType.Success 햅틱 알림
+ * 웹: 짧은 패턴 진동
+ */
+export function hapticSuccess() {
+  if (useNativeHaptics) {
+    Haptics.notification({ type: NotificationType.Success })
+      .catch((err) => {
+        if (err?.code === 'UNIMPLEMENTED') { useNativeHaptics = false; }
+        try { navigator.vibrate?.([50, 50, 100]); } catch { /* ignore */ }
+      });
+    return;
+  }
+  try { navigator.vibrate?.([50, 50, 100]); } catch { /* 미지원 시 무시 */ }
 }
 
 // ----------------------------------------------------------------

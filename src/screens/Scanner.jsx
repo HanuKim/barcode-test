@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { ScanLine, Camera, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Crosshair } from 'lucide-react';
 import useBarcodeScanner from '../hooks/useBarcodeScanner';
-import { speak, stopTTS, playBeep, playSuccessSound, hapticImpact, unlockAudio } from '../utils';
+import { speak, stopTTS, playBeep, playSuccessSound, hapticImpact, hapticSuccess, unlockAudio } from '../utils';
 import { fetchProduct } from '../services/productService';
 
 // ================================================================
@@ -96,7 +96,7 @@ export default function Scanner({ onResult }) {
         setDirectionText('');
 
         playSuccessSound();
-        hapticImpact();
+        hapticSuccess();
         stopTTS();
 
         const product = await fetchProduct(rawValue);
@@ -134,15 +134,13 @@ export default function Scanner({ onResult }) {
           setDirectionPos(null);
         }
 
-        // 3) 방향 TTS — 2.5초마다, 방향이 바뀌었을 때만
+        // 3) 방향 TTS — 2초마다 (동일 방향이어도 계속 안내)
         const now = Date.now();
-        if (direction && now - lastTtsTimeRef.current > 2500) {
-          if (direction !== lastTtsDirectionRef.current) {
-            lastTtsDirectionRef.current = direction;
-            lastTtsTimeRef.current = now;
-            stopTTS();
-            speak(direction, 1.3); // 빠르게 발화
-          }
+        if (direction && now - lastTtsTimeRef.current > 2000) {
+          lastTtsDirectionRef.current = direction;
+          lastTtsTimeRef.current = now;
+          stopTTS();
+          speak(direction, 1.3); // 빠르게 발화
         }
       }
     );
@@ -213,6 +211,28 @@ export default function Scanner({ onResult }) {
         }} />
         <canvas ref={scanner.canvasRef} style={{ display: 'none' }} />
         <div className="scanner-grid" />
+
+        {/* 🔧 디버그 오버레이 — 실시간 바코드 좌표/근접도 표시 */}
+        {scanner.debugInfo && (phase === 'scanning') && (
+          <div style={{
+            position: 'absolute', top: 8, left: 8, right: 8, zIndex: 30,
+            background: 'rgba(0,0,0,0.75)', borderRadius: 8, padding: '8px 10px',
+            fontSize: 11, fontFamily: 'monospace', color: '#0ff', lineHeight: 1.6,
+            pointerEvents: 'none',
+          }}>
+            <div>📡 모드: <b style={{color:'#ff0'}}>{scanner.debugInfo.mode ?? '초기화 중...'}</b></div>
+            {scanner.debugInfo.rawValue
+              ? <>
+                  <div>🔲 바코드: <b style={{color:'#0f0'}}>{scanner.debugInfo.rawValue}</b></div>
+                  <div>📍 중심(정규화): bx={scanner.debugInfo.bx} by={scanner.debugInfo.by}</div>
+                  <div>📐 BBox: {scanner.debugInfo.bb}</div>
+                  <div>🎯 근접도: <b style={{color: parseFloat(scanner.debugInfo.proximity) > 0.7 ? '#0f0' : '#ff0'}}>{Math.round(parseFloat(scanner.debugInfo.proximity)*100)}%</b></div>
+                  <div>🧭 방향: {scanner.debugInfo.direction}</div>
+                </>
+              : <div style={{color:'#888'}}>바코드 미감지</div>
+            }
+          </div>
+        )}
 
         {phase === 'scanning' && (
           <>
