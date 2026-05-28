@@ -1,0 +1,16 @@
+{
+  "appId": "com.allergyguard.app",
+  "appName": "AllergyGuard",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https"
+  },
+  "plugins": {
+    "Camera": {
+      "permissions": ["camera"]
+    }
+  },
+  "ios": {
+    "contentInset": "automatic"
+  }
+}
